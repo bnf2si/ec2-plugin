@@ -65,8 +65,12 @@ public class EC2Computer extends SlaveComputer {
         return (EC2AbstractSlave) super.getNode();
     }
 
+    @CheckForNull
     public String getInstanceId() {
         EC2AbstractSlave node = (EC2AbstractSlave) super.getNode();
+        if (node == null) {
+            return null;
+        }
         return node.getInstanceId();
     }
 
