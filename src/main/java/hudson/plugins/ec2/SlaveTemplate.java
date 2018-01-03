@@ -641,6 +641,7 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
                 if (checkInstance(instance)) {
                     logProvisionInfo("Found existing instance: " + instance);
                     orphans.add(instance);
+                    count++;
                 }
 
                 if (count == number) {

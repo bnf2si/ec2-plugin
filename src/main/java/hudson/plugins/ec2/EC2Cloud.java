@@ -43,11 +43,6 @@ import hudson.model.Node;
 import hudson.security.ACL;
 import hudson.slaves.Cloud;
 import hudson.slaves.NodeProvisioner.PlannedNode;
-import hudson.util.FormValidation;
-import hudson.util.HttpResponses;
-import hudson.util.ListBoxModel;
-import hudson.util.Secret;
-import hudson.util.StreamTaskListener;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -72,6 +67,7 @@ import java.util.Set;
 import java.util.HashMap;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
@@ -80,6 +76,11 @@ import java.util.logging.SimpleFormatter;
 import javax.servlet.ServletException;
 
 import hudson.model.TaskListener;
+import hudson.util.FormValidation;
+import hudson.util.HttpResponses;
+import hudson.util.ListBoxModel;
+import hudson.util.Secret;
+import hudson.util.StreamTaskListener;
 import jenkins.model.Jenkins;
 
 import org.apache.commons.lang.StringUtils;
@@ -541,19 +542,13 @@ public abstract class EC2Cloud extends Cloud {
     @Override
     public Collection<PlannedNode> provision(final Label label, int excessWorkload) {
         final SlaveTemplate t = getTemplate(label);
-        List<PlannedNode> r = new ArrayList<>();
+        List<PlannedNode> plannedNodes = new ArrayList<>();
 
         try {
             LOGGER.log(Level.INFO, "{0}. Attempting to provision slave needed by excess workload of " + excessWorkload + " units", t);
-            if (label == null) {
-                LOGGER.log(Level.WARNING, String.format("%s. Label is null - can't calculate how many executors slave will have. Using %s number of executors", t, t.getNumExecutors()));
-            }
-
-            LOGGER.log(Level.INFO, String.format("We have now %s computers", Jenkins.getActiveInstance().getComputers().length));
 
             if (t.isNode()) {
                 int number = Math.max(Math.round(excessWorkload)/ t.getNumExecutors(), 1);
-                LOGGER.info("Ask for " + t + " nodes " + number);
                 final List<EC2AbstractSlave> slaves = getNewOrExistingAvailableSlave(t, number, false);
 
                 if (slaves == null || slaves.isEmpty()) {
@@ -567,12 +562,14 @@ public abstract class EC2Cloud extends Cloud {
                         continue;
                     }
 
-                    r.add(createPlannedNode(t, slave));
+                    plannedNodes.add(createPlannedNode(t, slave));
                     excessWorkload -= t.getNumExecutors();
                 }
             }
             LOGGER.log(Level.INFO, "{0}. Attempting provision finished, excess workload: " + excessWorkload, t);
-            return r;
+            LOGGER.log(Level.INFO, "We have now {0} computers, waiting for {1} more",
+                    new Object[]{Jenkins.getActiveInstance().getComputers().length, plannedNodes.size()});
+            return plannedNodes;
         } catch (AmazonClientException e) {
             LOGGER.log(Level.WARNING, t + ". Exception during provisioning", e);
             return Collections.emptyList();
@@ -583,23 +580,43 @@ public abstract class EC2Cloud extends Cloud {
         return new PlannedNode(t.getDisplayName(),
                 Computer.threadPoolForRemoting.submit(new Callable<Node>() {
                     public Node call() throws Exception {
-                        // Otherwise would not be possible to convert "slave" to "Computer"
-                        Jenkins.getActiveInstance().addNode(slave);
-                        Computer computer = slave.toComputer();
+                        while (true) {
+                            String instanceId = slave.getInstanceId();
+                            if (slave instanceof EC2SpotSlave) {
+                                if (((EC2SpotSlave) slave).isSpotRequestDead()) {
+                                    LOGGER.log(Level.WARNING, "{0} Spot request died, can't do anything. Terminate provisioning", t);
+                                    return null;
+                                }
 
-                        if (computer == null) {
-                            LOGGER.warning("Something went terrible wrong: can't add slave to the Jenkins for " + t);
-                            return null;
+                                // Spot Instance does not have instance id yet.
+                                if (StringUtils.isEmpty(instanceId)) {
+                                    Thread.sleep(5000);
+                                    continue;
+                                }
+                            }
+
+                            Instance instance = CloudHelper.getInstance(instanceId, slave.getCloud());
+                            if (instance == null) {
+                                LOGGER.log(Level.WARNING, "{0} Can't find instance with instance id `{1}` in cloud {2}. Terminate provisioning ",
+                                        new Object[]{t, instanceId, slave.cloudName});
+                                return null;
+                            }
+
+                            InstanceStateName state = InstanceStateName.fromValue(instance.getState().getName());
+                            if (state.equals(InstanceStateName.Running)) {
+                                long startTime = TimeUnit.MILLISECONDS.toSeconds(System.currentTimeMillis() - instance.getLaunchTime().getTime());
+                                LOGGER.log(Level.INFO, "{0} Node {1} moved to RUNNING state in {2} seconds and is ready to be connected by Jenkins",
+                                        new Object[]{t, slave.getNodeName(), startTime});
+                                return slave;
+                            }
+                            if (!state.equals(InstanceStateName.Pending)) {
+                                LOGGER.log(Level.WARNING, "{0}. Node {1} is neither pending, neither running, it's {2}. Terminate provisioning",
+                                        new Object[]{t, state, slave.getNodeName()});
+                                return null;
+                            }
+
+                            Thread.sleep(5000);
                         }
-
-                        // waits while actual connect happened
-                        computer.connect(false).get();
-
-                        LOGGER.log(Level.INFO, String.format("%s. Added node named: %s, We have now %s computers", t,
-                                slave.getNodeName(),
-                                Jenkins.getActiveInstance().getComputers().length));
-
-                        return slave;
                     }
                 })
                 , t.getNumExecutors());
@@ -842,6 +859,7 @@ public abstract class EC2Cloud extends Cloud {
             if (exception != null)
                 message += " Exception: " + exception;
             LogRecord lr = new LogRecord(level, message);
+            lr.setLoggerName(LOGGER.getName());
             PrintStream printStream = listener.getLogger();
             printStream.print(sf.format(lr));
         }
