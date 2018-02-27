@@ -85,6 +85,7 @@ public abstract class EC2AbstractSlave extends Slave {
     public final String remoteAdmin; // e.g. 'ubuntu'
 
     public final String templateDescription;
+    public final String secret;
 
     public final String jvmopts; // e.g. -Xmx1g
     public final boolean stopOnTerminate;
@@ -126,13 +127,15 @@ public abstract class EC2AbstractSlave extends Slave {
 
     public static final String TEST_ZONE = "testZone";
 
-    public EC2AbstractSlave(String name, String instanceId, String description, String remoteFS, int numExecutors, Mode mode, String labelString, ComputerLauncher launcher, RetentionStrategy<EC2Computer> retentionStrategy, String initScript, String tmpDir, List<? extends NodeProperty<?>> nodeProperties, String remoteAdmin, String jvmopts, boolean stopOnTerminate, String idleTerminationMinutes, List<EC2Tag> tags, String cloudName, boolean usePrivateDnsName, boolean useDedicatedTenancy, int launchTimeout, AMITypeData amiType)
+
+    public EC2AbstractSlave(String name, String instanceId, String description, String templateDescription, String secret, String remoteFS, int numExecutors, Mode mode, String labelString, ComputerLauncher launcher, RetentionStrategy<EC2Computer> retentionStrategy, String initScript, String tmpDir, List<? extends NodeProperty<?>> nodeProperties, String remoteAdmin, String jvmopts, boolean stopOnTerminate, String idleTerminationMinutes, List<EC2Tag> tags, String cloudName, boolean usePrivateDnsName, boolean useDedicatedTenancy, int launchTimeout, AMITypeData amiType)
             throws FormException, IOException {
 
-        super(name, "", remoteFS, numExecutors, mode, labelString, launcher, retentionStrategy, nodeProperties);
+        super(name, description, remoteFS, numExecutors, mode, labelString, launcher, retentionStrategy, nodeProperties);
 
         this.instanceId = instanceId;
-        this.templateDescription = description;
+        this.templateDescription = templateDescription;
+        this.secret = secret;
         this.initScript = initScript;
         this.tmpDir = tmpDir;
         this.remoteAdmin = remoteAdmin;
@@ -321,7 +324,7 @@ public abstract class EC2AbstractSlave extends Slave {
 
         /* Get rid of the old tags, as represented by ourselves. */
         clearLiveInstancedata();
-
+        
         /* Set the new tags, as represented by our successor */
         result.pushLiveInstancedata();
         return result;
@@ -432,10 +435,16 @@ public abstract class EC2AbstractSlave extends Slave {
         publicDNS = i.getPublicDnsName();
         privateDNS = i.getPrivateIpAddress();
         createdTime = i.getLaunchTime().getTime();
-        tags = new LinkedList<EC2Tag>();
 
-        for (Tag t : i.getTags()) {
-            tags.add(new EC2Tag(t.getKey(), t.getValue()));
+        /*
+         * Only fetch tags from live instance if tags are set. This check is required to mitigate a race condition
+         * when fetchLiveInstanceData() is called before pushLiveInstancedata().
+         */
+        if(!i.getTags().isEmpty()) {
+            tags = new LinkedList<EC2Tag>();
+            for (Tag t : i.getTags()) {
+                tags.add(new EC2Tag(t.getKey(), t.getValue()));
+            }
         }
     }
 
@@ -504,11 +513,11 @@ public abstract class EC2AbstractSlave extends Slave {
     }
 
     public Secret getAdminPassword() {
-        return amiType.isWindows() ? ((WindowsData) amiType).getPassword() : Secret.fromString("");
+        return amiType.isWindows() && !amiType.isSelfConnecting()? ((WindowsData) amiType).getPassword() : Secret.fromString("");
     }
 
     public boolean isUseHTTPS() {
-        return amiType.isWindows() && ((WindowsData) amiType).isUseHTTPS();
+        return amiType.isWindows() && !amiType.isSelfConnecting() && ((WindowsData) amiType).isUseHTTPS();
     }
 
     public int getBootDelay() {
