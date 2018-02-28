@@ -44,8 +44,7 @@ import org.jvnet.hudson.test.JenkinsRule;
  */
 public class SlaveTemplateTest {
 
-    @Rule
-    public JenkinsRule r = new JenkinsRule();
+    @Rule public JenkinsRule r = new JenkinsRule();
 
     @Before
     public void setUp() throws Exception {

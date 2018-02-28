@@ -92,8 +92,6 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
     public final String userData;
 
     public final String numExecutors;
-    
-    public final String additionalExecuters;
 
     public final String remoteAdmin;
 
@@ -183,7 +181,6 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
         this.tmpDir = tmpDir;
         this.userData = userData;
         this.numExecutors = Util.fixNull(numExecutors).trim();
-        this.additionalExecuters = Util.fixNull(additionalExecuters).trim();
         this.remoteAdmin = remoteAdmin;
         this.jvmopts = jvmopts;
         this.stopOnTerminate = stopOnTerminate;
@@ -305,14 +302,6 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
             return EC2AbstractSlave.toNumExecutors(type);
         }
     }
-    
-    public int getAdditionalExecuters() {
-        try {
-            return Integer.parseInt(additionalExecuters);
-        } catch (NumberFormatException e) {
-            return 0;
-        }
-    }
 
     public int getSshPort() {
         try {
@@ -427,7 +416,6 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
 
     /**
      * Provisions a new EC2 slave or starts a previously stopped on-demand instance.
-     * @param alreadyLaunched 
      *
      * @return always non-null. This needs to be then added to {@link Hudson#addNode(Node)}.
      */
@@ -442,7 +430,6 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
 
     /**
      * Safely we can pickup only instance that is not known by Jenkins at all.
-     * @param alreadyLaunched 
      */
     private boolean checkInstance(Instance instance) {
         for (EC2AbstractSlave node : NodeIterator.nodes(EC2AbstractSlave.class)) {
@@ -477,7 +464,6 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
 
     /**
      * Provisions an On-demand EC2 slave by launching a new instance or starting a previously-stopped instance.
-     * @param alreadyLaunched 
      */
     private List<EC2AbstractSlave> provisionOndemand(int number, EnumSet<ProvisionOptions> provisionOptions) throws AmazonClientException, IOException {
         AmazonEC2 ec2 = getParent().connect();
@@ -500,28 +486,25 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
         List<Filter> diFilters = new ArrayList<Filter>();
         diFilters.add(new Filter("image-id").withValues(ami));
         diFilters.add(new Filter("instance-type").withValues(type.toString()));
-        
-        
-             String nodeName = null;
-            String nodeSecret = null;           
-            String userDataString = null;
-            if (amiType.isSelfConnecting()) {
-                nodeName = generateNodeName();
-                nodeSecret = generateNodeSecret(nodeName);               
-                userDataString = modifyUserData(nodeName, nodeSecret);
-                 
-            }
-            else {
-                 userDataString = Base64.encodeBase64String(userData.getBytes(StandardCharsets.UTF_8)); 
-            }
-            riRequest.setUserData(userDataString);
-			
-			KeyPair keyPair = getKeyPair(ec2);
-            if(keyPair != null) {
-                riRequest.setKeyName(keyPair.getKeyName());
-                diFilters.add(new Filter("key-name").withValues(keyPair.getKeyName()));
-            }
 
+        String nodeName = null;
+        String nodeSecret = null;
+        String userDataString = null;
+        if (amiType.isSelfConnecting()) {
+            nodeName = generateNodeName();
+            nodeSecret = generateNodeSecret(nodeName);
+            userDataString = modifyUserData(nodeName, nodeSecret);
+
+        } else {
+            userDataString = Base64.encodeBase64String(userData.getBytes(StandardCharsets.UTF_8));
+        }
+        riRequest.setUserData(userDataString);
+
+        KeyPair keyPair = getKeyPair(ec2);
+        if (keyPair != null) {
+            riRequest.setKeyName(keyPair.getKeyName());
+            diFilters.add(new Filter("key-name").withValues(keyPair.getKeyName()));
+        }
 
         if (StringUtils.isNotBlank(getZone())) {
             Placement placement = new Placement(getZone());
@@ -782,7 +765,6 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
 
     /**
      * Provision a new slave for an EC2 spot instance to call back to Jenkins
-     * @param alreadyLaunched 
      */
     private List<EC2AbstractSlave> provisionSpot(int number) throws AmazonClientException, IOException {
         AmazonEC2 ec2 = getParent().connect();
@@ -951,37 +933,23 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
 
     private String modifyUserData(String nodeName, String nodeSecret) {
         String newUserData;
-        // The slave must know the Jenkins server to register with as well   
-        // as the name of the node in Jenkins it should register as. The   
-        // only    
-        // way to give information to the Spot slaves is through the ec2   
-        // user data   
-        String jenkinsUrl = Jenkins.getInstance().getRootUrl();
-        
-        // We must provide a unique node name for the slave to connect to  
-        // Jenkins.    
-        // We don't have the EC2 generated instance ID, or the Spot request    
-        // ID  
-        // until after the instance is requested, which is then too late to    
-        // set the 
-        // user-data for the request. Instead we generate a unique name from   
-        // UUID    
-        // so that the slave has a unique name within Jenkins to register  
-        // to.            
 
-        // We want to allow node configuration with cloud-init 
-        // The 'new' way is triggered by the presence of '${SLAVE_NAME}'' in   
-        // the user data   
-        // (which is not too much to ask)  
-        if (userData.contains("${SLAVE_NAME}")) {  
-            // The cloud-init compatible way   
-            newUserData = new String(userData);    
-            newUserData = newUserData.replace("${SLAVE_NAME}", nodeName); 
-            newUserData = newUserData.replace("${SLAVE_SECRET}", nodeSecret);  
-            newUserData = newUserData.replace("${JENKINS_URL}", jenkinsUrl); 
+        // The slave must know the Jenkins server to register with as well
+        // as the name of the node in Jenkins it should register as. The only
+        // way to give information to the Spot slaves is through the ec2 user data
+        String jenkinsUrl = Jenkins.getInstance().getRootUrl();
+
+        // We want to allow node configuration with cloud-init
+        // The 'new' way is triggered by the presence of some Strings like
+        // '${SLAVE_NAME}' in the user data (which is not too much to ask)
+        if (userData.contains("${SLAVE_NAME}")) {
+            // The cloud-init compatible way
+            newUserData = new String(userData);
+            newUserData = newUserData.replace("${SLAVE_NAME}", nodeName);
+            newUserData = newUserData.replace("${SLAVE_SECRET}", nodeSecret);
+            newUserData = newUserData.replace("${JENKINS_URL}", jenkinsUrl);
             return Base64.encodeBase64String(newUserData.getBytes());
-        } 
-        else {
+        } else {
             LOGGER.severe("Placeholders like ${SLAVE_NAME} not provided in userdata");
             return userData;
         }
@@ -1102,6 +1070,12 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
         return ec2.describeSecurityGroups(groupReq);
     }
 
+    /**
+     * We must provide a unique node name for the slave to connect to Jenkins. We don't have the EC2 generated instance
+     * ID, or the Spot request ID until after the instance is requested, which is then too late to set the user-data for
+     * the request. Instead we generate a unique name from UUID so that the slave has a unique name within Jenkins to
+     * register to.
+     */
     private String generateNodeName() {
         return description + "-" + RandomStringUtils.randomAlphanumeric(8);
     }
