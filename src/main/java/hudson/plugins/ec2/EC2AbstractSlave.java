@@ -513,15 +513,15 @@ public abstract class EC2AbstractSlave extends Slave {
     }
 
     public Secret getAdminPassword() {
-        return amiType.isWindows() && !amiType.isSelfConnecting()? ((WindowsData) amiType).getPassword() : Secret.fromString("");
+        return amiType.isWindows() ? ((WindowsData) amiType).getPassword() : Secret.fromString("");
     }
 
     public boolean isUseHTTPS() {
-        return amiType.isWindows() && !amiType.isSelfConnecting() && ((WindowsData) amiType).isUseHTTPS();
+        return amiType.isWindows() && ((WindowsData) amiType).isUseHTTPS();
     }
 
     public int getBootDelay() {
-        return amiType.isWindows() ? ((WindowsData) amiType).getBootDelayInMillis() : 0;
+        return amiType.isWindows() ? ((WindowsData) amiType).getBootDelayInMillis() : amiType.isSelfConnecting() ? ((SelfConnectingData) amiType).getBootDelayInMillis(): 0;
     }
 
     public static ListBoxModel fillZoneItems(AWSCredentialsProvider credentialsProvider, String region) {
