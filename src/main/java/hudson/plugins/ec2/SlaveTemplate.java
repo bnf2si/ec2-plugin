@@ -1043,7 +1043,7 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
         }
 
         return new EC2SpotSlave(nodeName, spotInstanceRequestId, nodeDescription, description, nodeSecret, remoteFS, getNumExecutors(), mode, initScript,
-                tmpDir, labels, Collections.<NodeProperty<?>> emptyList(), remoteAdmin, jvmopts, idleTerminationMinutes, EC2Tag.fromAmazonTags(sir.getTags()), parent.name,
+                tmpDir, labels, Collections.<NodeProperty<?>> emptyList(), remoteAdmin, jvmopts, stopOnTerminate, idleTerminationMinutes, EC2Tag.fromAmazonTags(sir.getTags()), parent.name,
                 usePrivateDnsName, getLaunchTimeout(), amiType);
     }
 
