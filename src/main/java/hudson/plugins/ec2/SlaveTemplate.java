@@ -801,7 +801,7 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
             
             List<Filter> diFilters = new ArrayList<Filter>();
             LaunchSpecification launchSpecification = new LaunchSpecification();
-
+            
             launchSpecification.setImageId(ami);
             diFilters.add(new Filter("image-id").withValues(ami));
             
@@ -923,6 +923,15 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
             spotRequest.setSpotPrice(getSpotMaxBidPrice());
             spotRequest.setInstanceCount(number - orphans.size());
             spotRequest.setLaunchSpecification(launchSpecification);
+            if(stopOnTerminate){
+                spotRequest.setInstanceInterruptionBehavior(InstanceInterruptionBehavior.Stop);
+                spotRequest.withType(SpotInstanceType.Persistent); //Required when working with InstanceInterruptionBehavior.Stop
+                logProvisionInfo("Setting Instance Interruption Behavior : ShutdownBehavior.Stop");
+            }else{
+                spotRequest.setInstanceInterruptionBehavior(InstanceInterruptionBehavior.Terminate);
+                spotRequest.withType(SpotInstanceType.OneTime);
+                logProvisionInfo("Setting Instance Interruption Behavior : ShutdownBehavior.Terminate");
+            }
 
             // Make the request for a new Spot instance
             RequestSpotInstancesResult reqResult = ec2.requestSpotInstances(spotRequest);
