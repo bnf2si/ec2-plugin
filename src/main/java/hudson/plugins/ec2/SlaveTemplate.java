@@ -422,7 +422,7 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
     public List<EC2AbstractSlave> provision(int number, EnumSet<ProvisionOptions> provisionOptions) throws AmazonClientException, IOException {
         if (this.spotConfig != null) {
             if (provisionOptions.contains(ProvisionOptions.ALLOW_CREATE) || provisionOptions.contains(ProvisionOptions.FORCE_CREATE))
-                return provisionSpot(number);
+                return provisionSpot(number, provisionOptions);
             return null;
         }
         return provisionOndemand(number, provisionOptions);
@@ -638,6 +638,31 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
             // configuration issues upfront
         }
     }
+    
+    private List<EC2AbstractSlave> toSpotSlaves(AmazonEC2 ec2, List<Instance> newInstances, String nodeName, String nodeSecret) throws IOException {
+        try {
+            List<EC2AbstractSlave> slaves = new ArrayList<>(newInstances.size());
+            for (Instance instance : newInstances) {
+                List<Filter> filters = new ArrayList<Filter>();
+                filters.add(new Filter("instance-id").withValues(instance.getInstanceId()));
+                DescribeSpotInstanceRequestsRequest dsirRequest = new DescribeSpotInstanceRequestsRequest().withFilters(filters);
+                try {
+                    DescribeSpotInstanceRequestsResult dsirResult = ec2.describeSpotInstanceRequests(dsirRequest);
+                    List<SpotInstanceRequest> siRequests = dsirResult.getSpotInstanceRequests();
+                    SpotInstanceRequest sir = siRequests.get(0);
+                    slaves.add(newSpotSlave(sir,nodeName,nodeSecret));
+                    logProvisionInfo("Return spot request: " + sir);
+                } catch (AmazonClientException e) {
+                    // Spot request is no longer valid
+                    LOGGER.log(Level.WARNING, "Failed to fetch spot instance request for instance: " + instance.getInstanceId());
+                }       
+            }
+            return slaves;
+        } catch (FormException e) {
+            throw new AssertionError(e); // we should have discovered all
+            // configuration issues upfront
+        }
+    }
 
     private List<Instance> findOrphans(DescribeInstancesResult diResult, int number) {
         List<Instance> orphans = new ArrayList<>();
@@ -766,33 +791,29 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
     /**
      * Provision a new slave for an EC2 spot instance to call back to Jenkins
      */
-    private List<EC2AbstractSlave> provisionSpot(int number) throws AmazonClientException, IOException {
+    private List<EC2AbstractSlave> provisionSpot(int number, EnumSet<ProvisionOptions> provisionOptions)  throws AmazonClientException, IOException {
         AmazonEC2 ec2 = getParent().connect();
+        
+        logProvisionInfo("Considering launching");
 
         try {
-            LOGGER.info("Launching " + ami + " for template " + description);
-
             KeyPair keyPair = getKeyPair(ec2);
-
-            RequestSpotInstancesRequest spotRequest = new RequestSpotInstancesRequest();
-
-            // Validate spot bid before making the request
-            if (getSpotMaxBidPrice() == null) {
-                throw new AmazonClientException("Invalid Spot price specified: " + getSpotMaxBidPrice());
-            }
-
-            spotRequest.setSpotPrice(getSpotMaxBidPrice());
-            spotRequest.setInstanceCount(number);
-
+            
+            List<Filter> diFilters = new ArrayList<Filter>();
             LaunchSpecification launchSpecification = new LaunchSpecification();
 
             launchSpecification.setImageId(ami);
+            diFilters.add(new Filter("image-id").withValues(ami));
+            
             launchSpecification.setInstanceType(type);
+            diFilters.add(new Filter("instance-type").withValues(type.toString()));
+            
             launchSpecification.setEbsOptimized(ebsOptimized);
 
             if (StringUtils.isNotBlank(getZone())) {
                 SpotPlacement placement = new SpotPlacement(getZone());
                 launchSpecification.setPlacement(placement);
+                diFilters.add(new Filter("availability-zone").withValues(getZone()));
             }
 
             InstanceNetworkInterfaceSpecification net = new InstanceNetworkInterfaceSpecification();
@@ -802,6 +823,8 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
                 } else {
                     launchSpecification.setSubnetId(getSubnetId());
                 }
+                
+                diFilters.add(new Filter("subnet-id").withValues(getSubnetId()));
 
                 /*
                  * If we have a subnet ID then we can only use VPC security groups
@@ -822,12 +845,15 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
                             if (!groups.isEmpty())
                                 launchSpecification.setAllSecurityGroups(groups);
                         }
+                        
+                        diFilters.add(new Filter("instance.group-id").withValues(groupIds));
                     }
                 }
             } else {
                 /* No subnet: we can use standard security groups by name */
                 if (!securityGroupSet.isEmpty()) {
                     launchSpecification.setSecurityGroups(securityGroupSet);
+                    diFilters.add(new Filter("instance.group-name").withValues(securityGroupSet));
                 }
             }
             
@@ -847,8 +873,8 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
             launchSpecification.setUserData(userDataString);   
             if(keyPair != null) {
                 launchSpecification.setKeyName(keyPair.getKeyName());
+                diFilters.add(new Filter("key-name").withValues(keyPair.getKeyName()));
             }
-            launchSpecification.setInstanceType(type.toString());
 
             if (getAssociatePublicIp()) {
                 net.setAssociatePublicIpAddress(true);
@@ -857,13 +883,45 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
             }
 
             HashSet<Tag> instTags = buildTags(EC2Cloud.EC2_SLAVE_TYPE_SPOT);
+            for (Tag tag : instTags) {
+                diFilters.add(new Filter("tag:" + tag.getKey()).withValues(tag.getValue()));
+            }
+            
+            DescribeInstancesRequest diRequest = new DescribeInstancesRequest();
+            diRequest.setFilters(diFilters);
+
+            logProvisionInfo("Looking for existing instances with describe-instance: " + diRequest);
+
+            DescribeInstancesResult diResult = ec2.describeInstances(diRequest);
+            List<Instance> orphans = findOrphans(diResult, number);
+
+            if (orphans.isEmpty() && !provisionOptions.contains(ProvisionOptions.FORCE_CREATE) &&
+                    !provisionOptions.contains(ProvisionOptions.ALLOW_CREATE)) {
+                logProvisionInfo("No existing instance found - but cannot create new instance");
+                return null;
+            }
+
+            wakeOrphansUp(ec2, orphans);
+                     
+            if (orphans.size() == number) {
+                return toSpotSlaves(ec2, orphans, nodeName, nodeSecret);
+            }
 
             if (StringUtils.isNotBlank(getIamInstanceProfile())) {
                 launchSpecification.setIamInstanceProfile(new IamInstanceProfileSpecification().withArn(getIamInstanceProfile()));
             }
 
             setupBlockDeviceMappings(launchSpecification.getBlockDeviceMappings());
+            
+            RequestSpotInstancesRequest spotRequest = new RequestSpotInstancesRequest();
 
+            // Validate spot bid before making the request
+            if (getSpotMaxBidPrice() == null) {
+                throw new AmazonClientException("Invalid Spot price specified: " + getSpotMaxBidPrice());
+            }
+
+            spotRequest.setSpotPrice(getSpotMaxBidPrice());
+            spotRequest.setInstanceCount(number - orphans.size());
             spotRequest.setLaunchSpecification(launchSpecification);
 
             // Make the request for a new Spot instance
